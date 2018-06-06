@@ -2,6 +2,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeOperators   #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE FlexibleContexts #-}
 module Lib
     ( startApp
     ) where
@@ -9,28 +10,74 @@ module Lib
 import GHC.Exts
 import Data.Aeson
 import qualified Data.Aeson as A
+import qualified Database.Redis as Redis
 import Data.Aeson.TH
 import Network.Wai
 import Network.Wai.Handler.Warp
 import Servant
+import Servant.Server (err400, err404)
+import Control.Monad.IO.Class (liftIO)
+import qualified Data.ByteString.Lazy as BS
+import qualified Data.ByteString.Lazy.Char8 as BC
+import qualified Data.HashMap.Strict as HM
+import qualified Data.Text.Lazy.Encoding as TE
+import qualified Data.ByteString as BSS
 
-type API = "outbox" :> Post '[JSON] A.Value
+hostPrefix = "http://localhost:1234/obj/"
+
+type API = "outbox" :> ReqBody '[JSON] A.Value :> Post '[JSON] A.Value
       :<|> "inbox"  :> Get  '[JSON] A.Value
 
 startApp :: IO ()
 startApp = do
+  dbh <- Redis.checkedConnect Redis.defaultConnectInfo
+  Redis.runRedis dbh $ do
+     Redis.set "hello" "hello"
+     Redis.set "world" "world"
+     hello <- Redis.get "hello"
+     world <- Redis.get "world"
+     liftIO $ print (hello,world)
   putStrLn "Starting on port 1234"
-  run 1234 $ serve api server
+  run 1234 $ serve api (server dbh)
 
 api :: Proxy API
 api = Proxy
 
-server :: Server API
-server = outboxPost
-    :<|> inboxGet
+server dbh = outboxPost
+        :<|> inboxGet
+    where
+      outboxPost (Object obj) = do
+        newObjId <- getNewObjId dbh
+        let objWithId = HM.insert "id" (toJSON $ hostPrefix ++ (show newObjId)) obj
+        putObjIntoDb dbh (Object objWithId)
+        liftIO $ do
+          BC.putStrLn $ "Posted: " `BS.append` (A.encode (Object objWithId))
+        return $ Object $ fromList [ ("success", A.String "You did it!")
+                                   , ("posted", (Object objWithId))
+                                   ]
+      outboxPost _ = do
+        throwError $ err400 { errBody = "Must be JSON object" }
 
-outboxPost = return (A.String "You did it!")
+      inboxGet =
+        return $ Object $ fromList [ ("thing", A.String "yes")
+                                   , ("isa", A.Number 3)
+                                   ]
 
-inboxGet = return (Object $ fromList [ ("thing", A.String "yes")
-                                     , ("isa", A.Number 3)
-                                     ])
+getObjId (Object obj) = HM.lookup "id" obj
+
+putObjIntoDb :: Redis.Connection -> A.Value -> Handler ()
+putObjIntoDb dbh (Object obj) = do
+  case getObjId (Object obj) of
+    (Just objId) -> do
+      result <- liftIO $ Redis.runRedis dbh $
+        Redis.set (BS.toStrict (BC.pack ("obj:"++(show objId))))
+                  (BS.toStrict (A.encode (Object obj)))
+      return ()
+    Nothing -> throwError $ err400 { errBody = "attemt to put object with no id" }
+
+getNewObjId :: Redis.Connection -> Handler Integer 
+getNewObjId dbh = do
+  result <- liftIO $ Redis.runRedis dbh $ Redis.incr "counter_objid"
+  case result of
+    (Right val) -> return val
+    _ -> throwError $ err404 { errBody = "No such object" }
