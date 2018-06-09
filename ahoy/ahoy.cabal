@@ -25,6 +25,7 @@ library
                      , hedis
                      , unordered-containers
                      , text
+                     , scientific >= 0.3
   default-language:    Haskell2010
 
 executable ahoy

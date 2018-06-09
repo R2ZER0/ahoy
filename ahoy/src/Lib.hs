@@ -21,9 +21,10 @@ import Data.HashMap.Strict (lookup)
 import qualified Data.Text as T
 import qualified Data.ByteString.Lazy as BS
 import qualified Data.ByteString.Lazy.Char8 as BC
-import qualified Data.HashMap.Strict as HM
+import qualified Data.HashMap.Strict as HashMap
 import qualified Data.Text.Lazy.Encoding as TE
 import qualified Data.ByteString as BSS
+import qualified Data.Scientific as Scientific
 
 hostPrefix = "http://localhost:1234/obj/"
 
@@ -45,17 +46,17 @@ startApp = do
 api :: Proxy API
 api = Proxy
 
+type ObjId = Integer
+
 server dbh = outboxPost
         :<|> inboxGet
     where
       outboxPost (Object obj) = do
-        newObjId <- getNewObjId dbh
-        let objWithId = HM.insert "id" (toJSON $ hostPrefix ++ (show newObjId)) obj
-        putObjIntoDb dbh (Object objWithId)
+        objWithId <- putObjIntoDb dbh (Object obj)
         liftIO $ do
-          BC.putStrLn $ "Posted: " `BS.append` (A.encode (Object objWithId))
+          BC.putStrLn $ "Posted: " `BS.append` (A.encode objWithId)
         return $ Object $ fromList [ ("success", A.String "You did it!")
-                                   , ("posted", (Object objWithId))
+                                   , ("posted",  objWithId)
                                    ]
       outboxPost _ = do
         throwError $ err400 { errBody = "Must be JSON object" }
@@ -66,22 +67,57 @@ server dbh = outboxPost
                                    ]
 
 lookupObj :: T.Text -> Value -> Maybe Value
-lookupObj param (A.Object obj) = HM.lookup param obj
+lookupObj param (A.Object obj) = HashMap.lookup param obj
 lookupObj _ _ = Nothing
 
-getObjId = lookupObj "id"
+getObjId :: Value -> Maybe ObjId
+getObjId (A.Object obj) =
+  case lookupObj "id" (Object obj) of
+    (Just (A.Number idsci)) ->
+      case Scientific.floatingOrInteger idsci of
+        (Right idint) -> Just idint
+        (Left _) -> Nothing
+    _ -> Nothing
 
-putObjIntoDb :: Redis.Connection -> A.Value -> Handler ()
+putObjIntoDb :: Redis.Connection -> A.Value -> Handler Value
 putObjIntoDb dbh (Object obj) = do
   case getObjId (A.Object obj) of
-    (Just objId) -> do
-      result <- liftIO $ Redis.runRedis dbh $
-        Redis.set (BS.toStrict (BC.pack ("obj:"++(show objId))))
-                  (BS.toStrict (A.encode (Object obj)))
-      return ()
-    Nothing -> throwError $ err400 { errBody = "attemt to put object with no id" }
+    (Just objId) -> actuallyPutIntoDb (Object obj)
+    Nothing -> do
+        newObjId <- getNewObjId dbh
+        let objWithId = HashMap.insert "id" (toJSON $ hostPrefix ++ (show newObjId)) obj
+        actuallyPutIntoDb (Object objWithId)
+    where
+      actuallyPutIntoDb o@(Object _) =
+        case getObjId o of
+          (Just objId) -> do
+            result <- liftIO $ Redis.runRedis dbh $
+              Redis.set (BS.toStrict (BC.pack ("obj:"++(show objId))))
+                        (BS.toStrict (A.encode o))
+            return o
+          Nothing -> throwError $ err400 { errBody = "attempt to put object with no id" }
 
-getNewObjId :: Redis.Connection -> Handler Integer 
+str2redis :: String -> BSS.ByteString
+str2redis str = BS.toStrict $ BC.pack $ str
+
+
+getObjFromDb :: Redis.Connection -> ObjId -> Handler (Maybe Value)
+getObjFromDb dbh objid = do
+  redisResult <- liftIO $ redisResultDo
+  return $ case redisResult of
+    (Just jsonstr) -> A.decode $ BS.fromStrict jsonstr
+    Nothing -> Nothing
+  where
+    redisResultDo :: IO (Maybe BSS.ByteString)
+    redisResultDo = do
+      result <- Redis.runRedis dbh $ Redis.get (str2redis ("obj:" ++ (show objid)))
+      case result of
+        (Left (Redis.SingleLine jsonstr)) -> do
+          return (Just jsonstr)
+        _ -> do
+          return Nothing
+
+getNewObjId :: Redis.Connection -> Handler Integer
 getNewObjId dbh = do
   result <- liftIO $ Redis.runRedis dbh $ Redis.incr "counter_objid"
   case result of
