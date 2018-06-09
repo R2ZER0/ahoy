@@ -28,8 +28,10 @@ import qualified Data.Scientific as Scientific
 
 hostPrefix = "http://localhost:1234/obj/"
 
+type ObjId = Integer
+
 type API = "outbox" :> ReqBody '[JSON] A.Value :> Post '[JSON] A.Value
-      :<|> "inbox"  :> Get  '[JSON] A.Value
+      :<|> "inbox"  :> Capture "objid" ObjId :> Get  '[JSON] A.Value
 
 startApp :: IO ()
 startApp = do
@@ -46,7 +48,6 @@ startApp = do
 api :: Proxy API
 api = Proxy
 
-type ObjId = Integer
 
 server dbh = outboxPost
         :<|> inboxGet
@@ -61,10 +62,11 @@ server dbh = outboxPost
       outboxPost _ = do
         throwError $ err400 { errBody = "Must be JSON object" }
 
-      inboxGet =
-        return $ Object $ fromList [ ("thing", A.String "yes")
-                                   , ("isa", A.Number 3)
-                                   ]
+      inboxGet objid = do
+        result <- getObjFromDb dbh objid
+        case result of
+          (Just obj) -> return obj
+          Nothing -> throwError $ err404 { errBody = "No such object exists" }
 
 lookupObj :: T.Text -> Value -> Maybe Value
 lookupObj param (A.Object obj) = HashMap.lookup param obj
