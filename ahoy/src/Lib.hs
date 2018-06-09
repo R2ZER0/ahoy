@@ -17,6 +17,8 @@ import Network.Wai.Handler.Warp
 import Servant
 import Servant.Server (err400, err404)
 import Control.Monad.IO.Class (liftIO)
+import Data.HashMap.Strict (lookup)
+import qualified Data.Text as T
 import qualified Data.ByteString.Lazy as BS
 import qualified Data.ByteString.Lazy.Char8 as BC
 import qualified Data.HashMap.Strict as HM
@@ -63,11 +65,15 @@ server dbh = outboxPost
                                    , ("isa", A.Number 3)
                                    ]
 
-getObjId (Object obj) = HM.lookup "id" obj
+lookupObj :: T.Text -> Value -> Maybe Value
+lookupObj param (A.Object obj) = HM.lookup param obj
+lookupObj _ _ = Nothing
+
+getObjId = lookupObj "id"
 
 putObjIntoDb :: Redis.Connection -> A.Value -> Handler ()
 putObjIntoDb dbh (Object obj) = do
-  case getObjId (Object obj) of
+  case getObjId (A.Object obj) of
     (Just objId) -> do
       result <- liftIO $ Redis.runRedis dbh $
         Redis.set (BS.toStrict (BC.pack ("obj:"++(show objId))))
