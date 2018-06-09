@@ -32,7 +32,8 @@ hostPrefix = "http://localhost:1234/obj/"
 type ObjId = BSS.ByteString
 
 type API = "outbox" :> ReqBody '[JSON] A.Value :> Post '[JSON] A.Value
-      :<|> "inbox"  :> Capture "objid" String :> Get  '[JSON] A.Value
+      :<|> "inbox"  :> Get  '[JSON] A.Value
+      :<|> "obj"    :> Capture "objid" String :> Get  '[JSON] A.Value
 
 startApp :: IO ()
 startApp = do
@@ -53,6 +54,7 @@ api = Proxy
 
 server dbh = outboxPost
         :<|> inboxGet
+        :<|> objGet
     where
       outboxPost o@(Object obj) = do
         result <- liftIO $ putObjIntoDb dbh (Object obj)
@@ -68,8 +70,10 @@ server dbh = outboxPost
       outboxPost _ = do
         throwError $ err400 { errBody = "Must be JSON object" }
 
-      inboxGet textobjid = do
-        let objid = BCS.pack textobjid
+      inboxGet = objGet "11"
+
+      objGet textobjid = do
+        let objid = BSS.append hostPrefix $ BCS.pack textobjid
         result <- liftIO $ getObjFromDb dbh objid
         case result of
           (Left obj) -> return obj
