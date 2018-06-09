@@ -41,7 +41,8 @@ startApp = do
      Redis.set "world" "world"
      hello <- Redis.get "hello"
      world <- Redis.get "world"
-     liftIO $ print (hello,world)
+     fail <- Redis.get "this-will-fail"
+     liftIO $ print (hello, world, fail)
   putStrLn "Starting on port 1234"
   run 1234 $ serve api (server dbh)
 
@@ -65,59 +66,73 @@ server dbh = outboxPost
       inboxGet objid = do
         result <- getObjFromDb dbh objid
         case result of
-          (Just obj) -> return obj
-          Nothing -> throwError $ err404 { errBody = "No such object exists" }
+          (Left obj) -> return obj
+          (Right err) -> throwError $ err404 {
+            errBody = BS.concat ["Can't get object ", BC.pack ((show objid) ++ (show err))]
+          }
 
 lookupObj :: T.Text -> Value -> Maybe Value
 lookupObj param (A.Object obj) = HashMap.lookup param obj
 lookupObj _ _ = Nothing
 
-getObjId :: Value -> Maybe ObjId
-getObjId (A.Object obj) =
-  case lookupObj "id" (Object obj) of
+data ObjIdError = ObjIdErrorNoId | ObjIdErrorBadId deriving (Show, Read)
+
+getObjId :: Value -> Either ObjId ObjIdError
+getObjId o@(A.Object obj) =
+  case lookupObj "id" o of
     (Just (A.Number idsci)) ->
       case Scientific.floatingOrInteger idsci of
-        (Right idint) -> Just idint
-        (Left _) -> Nothing
-    _ -> Nothing
+        (Right idint) -> Left idint
+        (Left _) -> Right ObjIdErrorBadId
+    _ -> Right ObjIdErrorNoId
 
 putObjIntoDb :: Redis.Connection -> A.Value -> Handler Value
-putObjIntoDb dbh (Object obj) = do
-  case getObjId (A.Object obj) of
-    (Just objId) -> actuallyPutIntoDb (Object obj)
-    Nothing -> do
+putObjIntoDb dbh o@(Object obj) = do
+  case getObjId o of
+    (Left objId) -> actuallyPutIntoDb o
+    (Right _) -> do
         newObjId <- getNewObjId dbh
-        let objWithId = HashMap.insert "id" (toJSON $ hostPrefix ++ (show newObjId)) obj
-        actuallyPutIntoDb (Object objWithId)
+        let objHashWithId = HashMap.insert "id" (toJSON newObjId) obj
+        actuallyPutIntoDb (Object objHashWithId)
     where
       actuallyPutIntoDb o@(Object _) =
         case getObjId o of
-          (Just objId) -> do
+          (Left objId) -> do
             result <- liftIO $ Redis.runRedis dbh $
               Redis.set (BS.toStrict (BC.pack ("obj:"++(show objId))))
                         (BS.toStrict (A.encode o))
             return o
-          Nothing -> throwError $ err400 { errBody = "attempt to put object with no id" }
+          (Right err) -> throwError $ err400 {
+            errBody = BC.concat ["Object error ",  A.encode o, ": ", (BC.pack (show err))]
+            }
+
 
 str2redis :: String -> BSS.ByteString
 str2redis str = BS.toStrict $ BC.pack $ str
 
 
-getObjFromDb :: Redis.Connection -> ObjId -> Handler (Maybe Value)
+data GetObjError = GetObjErrorNotFound
+                 | GetObjErrorBadDatatype
+                 | GetObjErrorCantDecode
+                 | GetObjErrorDbError
+                 deriving (Show)
+
+getObjFromDb :: Redis.Connection -> ObjId -> Handler (Either Value GetObjError)
 getObjFromDb dbh objid = do
   redisResult <- liftIO $ redisResultDo
   return $ case redisResult of
-    (Just jsonstr) -> A.decode $ BS.fromStrict jsonstr
-    Nothing -> Nothing
+    (Left jsonstr) -> case A.decode $ BS.fromStrict jsonstr of
+      (Just jsonval) -> Left jsonval
+      Nothing -> Right GetObjErrorCantDecode
+    (Right err) -> Right err
   where
-    redisResultDo :: IO (Maybe BSS.ByteString)
+    redisResultDo :: IO (Either BSS.ByteString GetObjError)
     redisResultDo = do
       result <- Redis.runRedis dbh $ Redis.get (str2redis ("obj:" ++ (show objid)))
-      case result of
-        (Left (Redis.SingleLine jsonstr)) -> do
-          return (Just jsonstr)
-        _ -> do
-          return Nothing
+      return $ case result of
+        (Right (Just jsonstr)) -> Left jsonstr
+        (Right Nothing) -> Right GetObjErrorNotFound
+        (Left _) -> Right GetObjErrorDbError
 
 getNewObjId :: Redis.Connection -> Handler Integer
 getNewObjId dbh = do
