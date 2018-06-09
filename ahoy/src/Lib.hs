@@ -12,13 +12,14 @@ import           Data.Aeson
 import qualified Data.Aeson                 as A
 import           Data.Aeson.TH
 import qualified Data.ByteString            as BSS
+import qualified Data.ByteString.Char8      as BCS
 import qualified Data.ByteString.Lazy       as BS
 import qualified Data.ByteString.Lazy.Char8 as BC
 import           Data.HashMap.Strict        (lookup)
 import qualified Data.HashMap.Strict        as HashMap
 import qualified Data.Scientific            as Scientific
 import qualified Data.Text                  as T
-import qualified Data.Text.Lazy.Encoding    as TE
+import qualified Data.Text.Encoding         as TE
 import qualified Database.Redis             as Redis
 import           GHC.Exts
 import           Network.Wai
@@ -28,10 +29,10 @@ import           Servant.Server             (err400, err404, err500)
 
 hostPrefix = "http://localhost:1234/obj/"
 
-type ObjId = Integer
+type ObjId = BSS.ByteString
 
 type API = "outbox" :> ReqBody '[JSON] A.Value :> Post '[JSON] A.Value
-      :<|> "inbox"  :> Capture "objid" ObjId :> Get  '[JSON] A.Value
+      :<|> "inbox"  :> Capture "objid" String :> Get  '[JSON] A.Value
 
 startApp :: IO ()
 startApp = do
@@ -67,7 +68,8 @@ server dbh = outboxPost
       outboxPost _ = do
         throwError $ err400 { errBody = "Must be JSON object" }
 
-      inboxGet objid = do
+      inboxGet textobjid = do
+        let objid = BCS.pack textobjid
         result <- liftIO $ getObjFromDb dbh objid
         case result of
           (Left obj) -> return obj
@@ -84,10 +86,9 @@ data ObjIdError = ObjIdErrorNoId | ObjIdErrorBadId deriving (Show, Read)
 getObjId :: Value -> Either ObjId ObjIdError
 getObjId o@(A.Object obj) =
   case lookupObj "id" o of
-    (Just (A.Number idsci)) ->
-      case Scientific.floatingOrInteger idsci of
-        (Right idint) -> Left idint
-        (Left _)      -> Right ObjIdErrorBadId
+    (Just idval) -> case idval of
+      (A.String idstr) -> Left (TE.encodeUtf8 idstr)
+      _                -> Right ObjIdErrorBadId
     _ -> Right ObjIdErrorNoId
 
 
@@ -109,7 +110,7 @@ putObjIntoDb dbh o@(Object _) = withId o (getObjId o)
       withNewId :: Value -> (Maybe ObjId) -> IO (Either Value PutObjError)
       withNewId o Nothing = return $ Right PutObjErrorCantGenerateId
       withNewId o@(Object obj) (Just newObjId) = do
-        let objHashWithId = HashMap.insert "id" (toJSON newObjId) obj
+        let objHashWithId = HashMap.insert "id" (toJSON $ TE.decodeUtf8 newObjId) obj
         actuallyPutIntoDb (Object objHashWithId) newObjId
 
       actuallyPutIntoDb :: Value -> ObjId -> IO (Either Value PutObjError)
@@ -146,9 +147,9 @@ getObjFromDb dbh objid = do
     (Right Nothing) -> Right GetObjErrorNotFound
     (Left _) -> Right GetObjErrorDbError
 
-getNewObjId :: Redis.Connection -> IO (Maybe Integer)
+getNewObjId :: Redis.Connection -> IO (Maybe ObjId)
 getNewObjId dbh = do
   result <- liftIO $ Redis.runRedis dbh $ Redis.incr "counter_objid"
   return $ case result of
-    (Right val) -> Just val
+    (Right val) -> Just (BSS.append hostPrefix $ BS.toStrict $ BC.pack $ show $ val)
     (Left _)    -> Nothing
