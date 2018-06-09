@@ -1,30 +1,30 @@
-{-# LANGUAGE DataKinds       #-}
-{-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE TypeOperators   #-}
+{-# LANGUAGE DataKinds         #-}
+{-# LANGUAGE FlexibleContexts  #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TemplateHaskell   #-}
+{-# LANGUAGE TypeOperators     #-}
 module Lib
     ( startApp
     ) where
 
-import GHC.Exts
-import Data.Aeson
-import qualified Data.Aeson as A
-import qualified Database.Redis as Redis
-import Data.Aeson.TH
-import Network.Wai
-import Network.Wai.Handler.Warp
-import Servant
-import Servant.Server (err400, err404)
-import Control.Monad.IO.Class (liftIO)
-import Data.HashMap.Strict (lookup)
-import qualified Data.Text as T
-import qualified Data.ByteString.Lazy as BS
+import           Control.Monad.IO.Class     (liftIO)
+import           Data.Aeson
+import qualified Data.Aeson                 as A
+import           Data.Aeson.TH
+import qualified Data.ByteString            as BSS
+import qualified Data.ByteString.Lazy       as BS
 import qualified Data.ByteString.Lazy.Char8 as BC
-import qualified Data.HashMap.Strict as HashMap
-import qualified Data.Text.Lazy.Encoding as TE
-import qualified Data.ByteString as BSS
-import qualified Data.Scientific as Scientific
+import           Data.HashMap.Strict        (lookup)
+import qualified Data.HashMap.Strict        as HashMap
+import qualified Data.Scientific            as Scientific
+import qualified Data.Text                  as T
+import qualified Data.Text.Lazy.Encoding    as TE
+import qualified Database.Redis             as Redis
+import           GHC.Exts
+import           Network.Wai
+import           Network.Wai.Handler.Warp
+import           Servant
+import           Servant.Server             (err400, err404, err500)
 
 hostPrefix = "http://localhost:1234/obj/"
 
@@ -53,27 +53,31 @@ api = Proxy
 server dbh = outboxPost
         :<|> inboxGet
     where
-      outboxPost (Object obj) = do
-        objWithId <- putObjIntoDb dbh (Object obj)
-        liftIO $ do
-          BC.putStrLn $ "Posted: " `BS.append` (A.encode objWithId)
-        return $ Object $ fromList [ ("success", A.String "You did it!")
+      outboxPost o@(Object obj) = do
+        result <- liftIO $ putObjIntoDb dbh (Object obj)
+        case result of
+          (Right err) -> throwError $ err400 {
+            errBody = BC.concat ["Object error ",  A.encode o, ": ", (BC.pack (show err))]
+          }
+          (Left objWithId) -> do
+            liftIO $ BC.putStrLn $ "Posted: " `BS.append` (A.encode objWithId)
+            return $ Object $ fromList [ ("success", A.String "You did it!")
                                    , ("posted",  objWithId)
                                    ]
       outboxPost _ = do
         throwError $ err400 { errBody = "Must be JSON object" }
 
       inboxGet objid = do
-        result <- getObjFromDb dbh objid
+        result <- liftIO $ getObjFromDb dbh objid
         case result of
           (Left obj) -> return obj
           (Right err) -> throwError $ err404 {
-            errBody = BS.concat ["Can't get object ", BC.pack ((show objid) ++ (show err))]
+            errBody = BS.concat ["Can't get object ", BC.pack ((show objid) ++ ": " ++ (show err))]
           }
 
 lookupObj :: T.Text -> Value -> Maybe Value
 lookupObj param (A.Object obj) = HashMap.lookup param obj
-lookupObj _ _ = Nothing
+lookupObj _ _                  = Nothing
 
 data ObjIdError = ObjIdErrorNoId | ObjIdErrorBadId deriving (Show, Read)
 
@@ -83,28 +87,42 @@ getObjId o@(A.Object obj) =
     (Just (A.Number idsci)) ->
       case Scientific.floatingOrInteger idsci of
         (Right idint) -> Left idint
-        (Left _) -> Right ObjIdErrorBadId
+        (Left _)      -> Right ObjIdErrorBadId
     _ -> Right ObjIdErrorNoId
 
-putObjIntoDb :: Redis.Connection -> A.Value -> Handler Value
-putObjIntoDb dbh o@(Object obj) = do
-  case getObjId o of
-    (Left objId) -> actuallyPutIntoDb o
-    (Right _) -> do
-        newObjId <- getNewObjId dbh
-        let objHashWithId = HashMap.insert "id" (toJSON newObjId) obj
-        actuallyPutIntoDb (Object objHashWithId)
+
+data PutObjError = PutObjErrorId ObjIdError
+                 | PutObjErrorCantGenerateId
+                 | PutObjErrorDbError
+                 | PutObjErrorBadType
+                 deriving (Show)
+
+putObjIntoDb :: Redis.Connection -> A.Value -> IO (Either Value PutObjError)
+putObjIntoDb dbh o@(Object _) = withId o (getObjId o)
     where
-      actuallyPutIntoDb o@(Object _) =
-        case getObjId o of
-          (Left objId) -> do
-            result <- liftIO $ Redis.runRedis dbh $
-              Redis.set (BS.toStrict (BC.pack ("obj:"++(show objId))))
-                        (BS.toStrict (A.encode o))
-            return o
-          (Right err) -> throwError $ err400 {
-            errBody = BC.concat ["Object error ",  A.encode o, ": ", (BC.pack (show err))]
-            }
+      withId :: Value -> Either ObjId ObjIdError -> IO (Either Value PutObjError)
+      withId o (Left objid) = actuallyPutIntoDb o objid
+      withId o (Right _) = do
+        newObjIdM <- getNewObjId dbh
+        withNewId o newObjIdM
+
+      withNewId :: Value -> (Maybe ObjId) -> IO (Either Value PutObjError)
+      withNewId o Nothing = return $ Right PutObjErrorCantGenerateId
+      withNewId o@(Object obj) (Just newObjId) = do
+        let objHashWithId = HashMap.insert "id" (toJSON newObjId) obj
+        actuallyPutIntoDb (Object objHashWithId) newObjId
+
+      actuallyPutIntoDb :: Value -> ObjId -> IO (Either Value PutObjError)
+      actuallyPutIntoDb o@(Object _) id = do
+        result <- Redis.runRedis dbh $
+          Redis.set (BS.toStrict (BC.pack ("obj:"++(show id))))
+                    (BS.toStrict (A.encode o))
+        return $ doneRedis o result
+      actuallyPutIntoDb _ _ = return (Right PutObjErrorBadType)
+
+      doneRedis :: A.Value -> Either Redis.Reply Redis.Status -> Either Value PutObjError
+      doneRedis o (Right Redis.Ok) = Left o
+      doneRedis o _                = Right PutObjErrorDbError
 
 
 str2redis :: String -> BSS.ByteString
@@ -117,26 +135,20 @@ data GetObjError = GetObjErrorNotFound
                  | GetObjErrorDbError
                  deriving (Show)
 
-getObjFromDb :: Redis.Connection -> ObjId -> Handler (Either Value GetObjError)
+getObjFromDb :: Redis.Connection -> ObjId -> IO (Either Value GetObjError)
 getObjFromDb dbh objid = do
-  redisResult <- liftIO $ redisResultDo
+  redisResult <- Redis.runRedis dbh $ Redis.get (str2redis ("obj:" ++ (show objid)))
   return $ case redisResult of
-    (Left jsonstr) -> case A.decode $ BS.fromStrict jsonstr of
-      (Just jsonval) -> Left jsonval
-      Nothing -> Right GetObjErrorCantDecode
-    (Right err) -> Right err
-  where
-    redisResultDo :: IO (Either BSS.ByteString GetObjError)
-    redisResultDo = do
-      result <- Redis.runRedis dbh $ Redis.get (str2redis ("obj:" ++ (show objid)))
-      return $ case result of
-        (Right (Just jsonstr)) -> Left jsonstr
-        (Right Nothing) -> Right GetObjErrorNotFound
-        (Left _) -> Right GetObjErrorDbError
+    (Right (Just jsonstr)) ->
+      case A.decode $ BS.fromStrict jsonstr of
+        (Just jsonval) -> Left jsonval
+        Nothing        -> Right GetObjErrorCantDecode
+    (Right Nothing) -> Right GetObjErrorNotFound
+    (Left _) -> Right GetObjErrorDbError
 
-getNewObjId :: Redis.Connection -> Handler Integer
+getNewObjId :: Redis.Connection -> IO (Maybe Integer)
 getNewObjId dbh = do
   result <- liftIO $ Redis.runRedis dbh $ Redis.incr "counter_objid"
-  case result of
-    (Right val) -> return val
-    _ -> throwError $ err404 { errBody = "No such object" }
+  return $ case result of
+    (Right val) -> Just val
+    (Left _)    -> Nothing
