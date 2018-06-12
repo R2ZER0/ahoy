@@ -7,31 +7,29 @@ module Lib
     ( startApp
     ) where
 
-import Obj
-import ObjDb
-import qualified Data.ByteString            as BSS
 import           Control.Monad.IO.Class     (liftIO)
-import           Data.Aeson
-import qualified Data.Aeson                 as A
-import           Data.Aeson.TH
+import qualified Data.Aeson                 as Json
+import qualified Data.ByteString            as BSS
+import qualified Data.ByteString.Char8      as BCS
+import qualified Data.ByteString.Lazy       as BS
+import qualified Data.ByteString.Lazy.Char8 as BC
 import           Data.HashMap.Strict        (lookup)
 import qualified Data.Scientific            as Scientific
-import qualified Data.Text                  as T
+import qualified Data.Text                  as Text
+import qualified Database.Redis             as Redis
 import           GHC.Exts
 import           Network.Wai
 import           Network.Wai.Handler.Warp
+import           Obj
+import           ObjDb
 import           Servant
 import           Servant.Server             (err400, err404, err500)
-import qualified Data.ByteString.Char8      as BCS
-import qualified Database.Redis             as Redis
-import qualified Data.ByteString.Lazy       as BS
-import qualified Data.ByteString.Lazy.Char8 as BC
 
 
 
-type API = "outbox" :> ReqBody '[JSON] A.Value :> Post '[JSON] A.Value
-      :<|> "inbox"  :> Get  '[JSON] A.Value
-      :<|> "obj"    :> Capture "objid" String :> Get  '[JSON] A.Value
+type API = "outbox" :> ReqBody '[JSON] Json.Value :> Post '[JSON] Json.Value
+      :<|> "inbox"  :> Get  '[JSON] Json.Value
+      :<|> "obj"    :> Capture "objid" String :> Get  '[JSON] Json.Value
 
 startApp :: IO ()
 startApp = do
@@ -53,15 +51,15 @@ server dbh = outboxPost
         :<|> inboxGet
         :<|> objGet
     where
-      outboxPost o@(Object obj) = do
-        result <- liftIO $ putObjIntoDb dbh (Object obj)
+      outboxPost o@(Json.Object obj) = do
+        result <- liftIO $ putObjIntoDb dbh (Json.Object obj)
         case result of
           (Right err) -> throwError $ err400 {
-            errBody = BC.concat ["Object error ",  A.encode o, ": ", (BC.pack (show err))]
+            errBody = BC.concat ["Object error ",  Json.encode o, ": ", (BC.pack (show err))]
           }
           (Left objWithId) -> do
-            liftIO $ BC.putStrLn $ "Posted: " `BS.append` (A.encode objWithId)
-            return $ Object $ fromList [ ("success", A.String "You did it!")
+            liftIO $ BC.putStrLn $ "Posted: " `BS.append` (Json.encode objWithId)
+            return $ Json.Object $ fromList [ ("success", Json.String "You did it!")
                                    , ("posted",  objWithId)
                                    ]
       outboxPost _ = do
