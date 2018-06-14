@@ -11,6 +11,7 @@ module ObjDb
   , hostPrefix  -- TODO use config or something
   ) where
 
+import           Control.Monad.Except
 import           Control.Monad.IO.Class     (liftIO)
 import qualified Data.Aeson                 as Json
 import qualified Data.ByteString            as BSS
@@ -27,38 +28,38 @@ hostPrefix = "http://localhost:1234/obj/"
 str2redis :: String -> BSS.ByteString
 str2redis str = BS.toStrict $ BC.pack $ str
 
-data PutObjError = PutObjErrorId ObjIdError
+data PutObjError = PutObjErrorId ObjLookupError
                  | PutObjErrorCantGenerateId
                  | PutObjErrorDbError
                  | PutObjErrorBadType
                  deriving (Show)
 
-putObjIntoDb :: Redis.Connection -> Json.Value -> IO (Either Json.Value PutObjError)
+putObjIntoDb :: Redis.Connection -> Json.Value -> IO (Either PutObjError Json.Value)
 putObjIntoDb dbh o@(Json.Object _) = withId o (getObjId o)
     where
-      withId :: Json.Value -> Either ObjId ObjIdError -> IO (Either Json.Value PutObjError)
-      withId o (Left objid) = actuallyPutIntoDb o objid
-      withId o (Right _) = do
+      withId :: Json.Value -> Either ObjLookupError ObjId -> IO (Either PutObjError Json.Value)
+      withId o (Right objid) = actuallyPutIntoDb o objid
+      withId o (Left _) = do
         newObjIdM <- getNewObjId dbh
         withNewId o newObjIdM
 
-      withNewId :: Json.Value -> (Maybe ObjId) -> IO (Either Json.Value PutObjError)
-      withNewId o Nothing = return $ Right PutObjErrorCantGenerateId
+      withNewId :: Json.Value -> (Maybe ObjId) -> IO (Either PutObjError Json.Value)
+      withNewId o Nothing = return $ Left PutObjErrorCantGenerateId
       withNewId o@(Json.Object obj) (Just newObjId) = do
         let objHashWithId = HashMap.insert "id" (Json.toJSON $ TE.decodeUtf8 newObjId) obj
         actuallyPutIntoDb (Json.Object objHashWithId) newObjId
 
-      actuallyPutIntoDb :: Json.Value -> ObjId -> IO (Either Json.Value PutObjError)
+      actuallyPutIntoDb :: Json.Value -> ObjId -> IO (Either PutObjError Json.Value)
       actuallyPutIntoDb o@(Json.Object _) id = do
         result <- Redis.runRedis dbh $
           Redis.set (BS.toStrict (BC.pack ("obj:"++(show id))))
                     (BS.toStrict (Json.encode o))
         return $ doneRedis o result
-      actuallyPutIntoDb _ _ = return (Right PutObjErrorBadType)
+      actuallyPutIntoDb _ _ = return (Left PutObjErrorBadType)
 
-      doneRedis :: Json.Value -> Either Redis.Reply Redis.Status -> Either Json.Value PutObjError
-      doneRedis o (Right Redis.Ok) = Left o
-      doneRedis o _                = Right PutObjErrorDbError
+      doneRedis :: Json.Value -> Either Redis.Reply Redis.Status -> Either PutObjError Json.Value
+      doneRedis o (Right Redis.Ok) = Right o
+      doneRedis o _                = Left PutObjErrorDbError
 
 
 

@@ -5,29 +5,48 @@
 {-# LANGUAGE TypeOperators     #-}
 module Obj
   ( ObjId
-  , lookupObj
-  , ObjIdError
+  , ObjLookupError
+  , objLookup
   , getObjId
   ) where
 
-import qualified Data.Aeson          as Json
-import qualified Data.ByteString     as BSS
-import qualified Data.HashMap.Strict as HashMap
-import qualified Data.Text           as T
-import qualified Data.Text.Encoding  as TE
+import           Control.Applicative
+import           Control.Monad
+import           Control.Monad.Except
+import           Control.Monad.Trans.Except
+import qualified Data.Aeson                 as Json
+import qualified Data.ByteString            as BSS
+import qualified Data.HashMap.Strict        as HashMap
+import           Data.Monoid
+import qualified Data.Text                  as T
+import qualified Data.Text.Encoding         as TE
 
 type ObjId = BSS.ByteString
 
-lookupObj :: T.Text -> Json.Value -> Maybe Json.Value
-lookupObj param (Json.Object obj) = HashMap.lookup param obj
-lookupObj _ _                     = Nothing
+data ObjLookupError = ObjLookupErrorNotExists
+                    | ObjLookupErrorNotObj
+                    | ObjLookupErrorNone
+                    deriving (Show)
 
-data ObjIdError = ObjIdErrorNoId | ObjIdErrorBadId deriving (Show, Read)
+instance Monoid ObjLookupError where
+  mappend err _ = err
+  mempty = ObjLookupErrorNone
 
-getObjId :: Json.Value -> Either ObjId ObjIdError
-getObjId o@(Json.Object obj) =
-  case lookupObj "id" o of
-    (Just idval) -> case idval of
-      (Json.String idstr) -> Left (TE.encodeUtf8 idstr)
-      _                   -> Right ObjIdErrorBadId
-    _ -> Right ObjIdErrorNoId
+type ObjLookupMonad = ExceptT ObjLookupError IO
+
+
+objLookup :: T.Text -> Json.Value -> ObjLookupMonad Json.Value
+objLookup param (Json.Object obj) = case HashMap.lookup param obj of
+  (Just val) -> return val
+  Nothing    -> throwError ObjLookupErrorNotExists
+objLookup _ _                     = throwError ObjLookupErrorNotObj
+
+
+getObjId :: Json.Value -> ObjLookupMonad ObjId
+getObjId o@(Json.Object obj) = do
+  idVal <- (objLookup "id" o) <|> (objLookup "@id" o)
+  case idVal of
+    (Json.String idstr) -> return (TE.encodeUtf8 idstr)
+    _                   -> throwError ObjLookupErrorNotObj
+  where
+

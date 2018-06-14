@@ -18,16 +18,18 @@ library
   exposed-modules:     Lib
                      , ObjDb
                      , Obj
-  build-depends:       base >= 4.7 && < 5
-                     , aeson
-                     , servant-server
-                     , wai
-                     , warp
+  build-depends:       aeson
+                     , base >= 4.7 && < 5
                      , bytestring >= 0.10
                      , hedis
-                     , unordered-containers
-                     , text
+                     , mtl
                      , scientific >= 0.3
+                     , servant-server
+                     , text
+                     , transformers
+                     , unordered-containers
+                     , wai
+                     , warp
   default-language:    Haskell2010
 
 executable ahoy
