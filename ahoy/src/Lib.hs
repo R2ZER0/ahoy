@@ -52,14 +52,15 @@ server dbh = outboxPost
         :<|> objGet
     where
       outboxPost o@(Json.Object obj) = do
-        result <- liftIO $ putObjIntoDb dbh (Json.Object obj)
+        let objWithContext = insertIfNotExists "@context" "https://www.w3.org/ns/activitystreams" obj
+        result <- liftIO $ putObjIntoDb dbh (Json.Object objWithContext)
         case result of
           (Left err) -> throwError $ err400 {
             errBody = BC.concat ["Object error ",  Json.encode o, ": ", (BC.pack (show err))]
           }
           (Right objWithId) -> do
             inboxUpdateResult <- liftIO $ addToDbCollection dbh inboxId objWithId
-            liftIO $ putStrLn $ show inboxUpdateResult
+            --liftIO $ putStrLn $ show inboxUpdateResult
             liftIO $ BC.putStrLn $ "Posted: " `BS.append` (Json.encode objWithId)
             return $ Json.Object $ fromList [ ("success", Json.String "You did it!")
                                    , ("posted",  objWithId)

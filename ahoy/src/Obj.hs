@@ -15,6 +15,7 @@ module Obj
   , Collection ()
   , objFromCollection
   , collectionInsert
+  , insertIfNotExists
   ) where
 
 import           Control.Applicative
@@ -38,6 +39,8 @@ data ObjLookupError = ObjLookupErrorNotExists
                     | ObjLookupErrorWrongDataType
                     | ObjLookupErrorNone
                     deriving (Show, Eq)
+
+insertIfNotExists key val hm = Map.insertWith (\new old -> old) key val hm
 
 data ChainableLookup = Result Json.Value | Error ObjLookupError
 

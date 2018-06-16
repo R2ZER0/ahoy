@@ -33,10 +33,11 @@ hostPrefix = "http://localhost:1234/obj/"
 str2redis :: String -> BSS.ByteString
 str2redis str = BS.toStrict $ BC.pack $ str
 
-data UpdateObjError = UpdateObjErrorGet GetObjError
+data UpdateObjError a = UpdateObjErrorGet GetObjError
                     | UpdateObjErrorPut PutObjError
                     | UpdateObjErrorWrongType
                     | UpdateObjErrorCantParse
+                    | UpdateObjErrorMap a
                     deriving (Show, Eq)
 
 data PutObjError = PutObjErrorId ObjLookupError
@@ -51,6 +52,21 @@ data GetObjError = GetObjErrorNotFound
                  | GetObjErrorCantParse
                  | GetObjErrorDbError
                  deriving (Show, Eq)
+
+mapDb :: (Json.Value -> Either a Json.Value) -> Redis.Connection -> ObjId -> IO (Either (UpdateObjError a) Json.Value)
+mapDb f dbh objId = do
+  objResult <- getObjFromDb dbh objId
+  case objResult of
+    Left getErr -> return $ Left $ UpdateObjErrorGet getErr
+    Right obj -> do
+      let mapResult = f obj
+      case mapResult of
+        Left err -> return $ Left $ UpdateObjErrorMap err
+        Right newObj -> do
+          putResult <- putObjIntoDb dbh newObj
+          case putResult of
+            Left putErr -> return $ Left $ UpdateObjErrorPut putErr
+            Right putObj -> return $ Right putObj
 
 getCollectionFromDb :: Redis.Connection -> ObjId -> IO (Either GetObjError Collection)
 getCollectionFromDb dbh collId = do
@@ -68,22 +84,13 @@ getCollectionFromDbOrEmpty dbh collId = do
     Left _ -> emptyCollection
     Right coll -> coll
 
-addToDbCollection :: Redis.Connection -> ObjId -> Json.Value -> IO (Either UpdateObjError Json.Value)
-addToDbCollection dbh collId objToPut = do
-  collResult <- getCollectionFromDb dbh collId
-  case collResult of
-    Left GetObjErrorNotFound -> updateAndPut $ emptyCollectionWithId collId
-    Left getErr -> return $ Left (UpdateObjErrorGet getErr)
-    Right coll -> updateAndPut coll
+addToDbCollection :: Redis.Connection -> ObjId -> Json.Value -> IO (Either (UpdateObjError GetObjError) Json.Value)
+addToDbCollection dbh collId objToPut = mapDb updateF dbh collId
   where
-    updateAndPut :: Collection -> IO (Either UpdateObjError Json.Value)
-    updateAndPut inboxColl = do
-      let newInboxColl = collectionInsert inboxColl objToPut
-      let newInboxObj = objFromCollection newInboxColl
-      putResult <- putObjIntoDb dbh newInboxObj
-      case putResult of
-        Left putErr -> return $ Left (UpdateObjErrorPut putErr)
-        Right _ -> return $ Right newInboxObj 
+    updateF :: Json.Value -> Either GetObjError Json.Value
+    updateF obj = case collectionFromObj obj of
+        Nothing -> Left GetObjErrorCantParse
+        Just coll -> Right $ objFromCollection (collectionInsert coll objToPut) 
 
 putObjIntoDb :: Redis.Connection -> Json.Value -> IO (Either PutObjError Json.Value)
 putObjIntoDb dbh o@(Json.Object _) = withId o (getObjId o)
