@@ -29,7 +29,7 @@ import           Servant.Server             (err400, err404, err500)
 
 type API = "outbox" :> ReqBody '[JSON] Json.Value :> Post '[JSON] Json.Value
       :<|> "inbox"  :> Get  '[JSON] Json.Value
-      :<|> "obj"    :> Capture "objid" String :> Get  '[JSON] Json.Value
+      :<|> "obj"    :> Capture "objid" Text.Text :> Get  '[JSON] Json.Value
 
 startApp :: IO ()
 startApp = do
@@ -54,10 +54,10 @@ server dbh = outboxPost
       outboxPost o@(Json.Object obj) = do
         result <- liftIO $ putObjIntoDb dbh (Json.Object obj)
         case result of
-          (Right err) -> throwError $ err400 {
+          (Left err) -> throwError $ err400 {
             errBody = BC.concat ["Object error ",  Json.encode o, ": ", (BC.pack (show err))]
           }
-          (Left objWithId) -> do
+          (Right objWithId) -> do
             liftIO $ BC.putStrLn $ "Posted: " `BS.append` (Json.encode objWithId)
             return $ Json.Object $ fromList [ ("success", Json.String "You did it!")
                                    , ("posted",  objWithId)
@@ -65,13 +65,13 @@ server dbh = outboxPost
       outboxPost _ = do
         throwError $ err400 { errBody = "Must be JSON object" }
 
-      inboxGet = objGet "11"
+      inboxGet = objGet "2"
 
       objGet textobjid = do
-        let objid = BSS.append hostPrefix $ BCS.pack textobjid
+        let objid = Text.append hostPrefix $ textobjid
         result <- liftIO $ getObjFromDb dbh objid
         case result of
-          (Left obj) -> return obj
-          (Right err) -> throwError $ err404 {
+          (Right obj) -> return obj
+          (Left err) -> throwError $ err404 {
             errBody = BS.concat ["Can't get object ", BC.pack ((show objid) ++ ": " ++ (show err))]
           }
