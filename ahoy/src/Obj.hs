@@ -10,6 +10,7 @@ module Obj
   , getObjId
   , objHasType
   , emptyCollection
+  , emptyCollectionWithId
   , collectionFromObj
   , Collection ()
   , objFromCollection
@@ -90,6 +91,13 @@ objFromCollection (CollectionInst obj) = obj
 
 emptyCollection = CollectionInst $ Json.object
   [ "@context" .= Json.String "https://www.w3.org/ns/activitystreams"
+  , "type" .= Json.String "Collection"
+  , "items" .= ([] :: [Json.Value])
+  ]
+  
+emptyCollectionWithId id = CollectionInst $ Json.object
+  [ "@context" .= Json.String "https://www.w3.org/ns/activitystreams"
+  , "id" .= Json.String id
   , "type" .= Json.String "Collection"
   , "items" .= ([] :: [Json.Value])
   ]

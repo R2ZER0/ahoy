@@ -58,6 +58,8 @@ server dbh = outboxPost
             errBody = BC.concat ["Object error ",  Json.encode o, ": ", (BC.pack (show err))]
           }
           (Right objWithId) -> do
+            inboxUpdateResult <- liftIO $ addToDbCollection dbh inboxId objWithId
+            liftIO $ putStrLn $ show inboxUpdateResult
             liftIO $ BC.putStrLn $ "Posted: " `BS.append` (Json.encode objWithId)
             return $ Json.Object $ fromList [ ("success", Json.String "You did it!")
                                    , ("posted",  objWithId)
@@ -65,7 +67,13 @@ server dbh = outboxPost
       outboxPost _ = do
         throwError $ err400 { errBody = "Must be JSON object" }
 
-      inboxGet = objGet "2"
+      inboxId = Text.append hostPrefix "inbox"
+
+      inboxGet = do
+        collResult <- liftIO $ getCollectionFromDb dbh inboxId
+        case collResult of
+          Right coll -> return $ objFromCollection coll
+          Left err -> throwError $ err500 { errBody = (BC.pack $ show err) }
 
       objGet textobjid = do
         let objid = Text.append hostPrefix $ textobjid

@@ -9,6 +9,9 @@ module ObjDb
   , GetObjError
   , getObjFromDb
   , hostPrefix  -- TODO use config or something
+  , getCollectionFromDb
+  , getCollectionFromDbOrEmpty
+  , addToDbCollection
   ) where
 
 import           Control.Monad.Except
@@ -69,7 +72,7 @@ addToDbCollection :: Redis.Connection -> ObjId -> Json.Value -> IO (Either Updat
 addToDbCollection dbh collId objToPut = do
   collResult <- getCollectionFromDb dbh collId
   case collResult of
-    Left GetObjErrorNotFound -> updateAndPut $ emptyCollection
+    Left GetObjErrorNotFound -> updateAndPut $ emptyCollectionWithId collId
     Left getErr -> return $ Left (UpdateObjErrorGet getErr)
     Right coll -> updateAndPut coll
   where
