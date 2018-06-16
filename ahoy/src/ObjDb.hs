@@ -45,19 +45,33 @@ data PutObjError = PutObjErrorId ObjLookupError
 data GetObjError = GetObjErrorNotFound
                  | GetObjErrorBadDatatype
                  | GetObjErrorCantDecode
+                 | GetObjErrorCantParse
                  | GetObjErrorDbError
                  deriving (Show, Eq)
 
-addToInbox :: Redis.Connection -> Json.Value -> IO (Either UpdateObjError Json.Value)
-addToInbox dbh objToPut = do
-  inboxObjResult <- getObjFromDb dbh (Text.append "http://localhost:1234/" "inbox")
-  case inboxObjResult of
+getCollectionFromDb :: Redis.Connection -> ObjId -> IO (Either GetObjError Collection)
+getCollectionFromDb dbh collId = do
+  objResult <- getObjFromDb dbh collId
+  return $ case objResult of
+    Left getErr -> Left getErr
+    Right obj -> case collectionFromObj obj of
+      Just coll -> Right coll
+      Nothing -> Left GetObjErrorCantParse
+
+getCollectionFromDbOrEmpty :: Redis.Connection -> ObjId -> IO Collection
+getCollectionFromDbOrEmpty dbh collId = do
+  result <- getCollectionFromDb dbh collId
+  return $ case result of
+    Left _ -> emptyCollection
+    Right coll -> coll
+
+addToDbCollection :: Redis.Connection -> ObjId -> Json.Value -> IO (Either UpdateObjError Json.Value)
+addToDbCollection dbh collId objToPut = do
+  collResult <- getCollectionFromDb dbh collId
+  case collResult of
     Left GetObjErrorNotFound -> updateAndPut $ emptyCollection
     Left getErr -> return $ Left (UpdateObjErrorGet getErr)
-    Right inboxObj@(Json.Object _) -> case collectionFromObj inboxObj of
-      (Just inboxColl) -> updateAndPut inboxColl
-      Nothing          -> return $ Left UpdateObjErrorCantParse
-    Right _ -> return $ Left UpdateObjErrorWrongType
+    Right coll -> updateAndPut coll
   where
     updateAndPut :: Collection -> IO (Either UpdateObjError Json.Value)
     updateAndPut inboxColl = do
